@@ -1,0 +1,22 @@
+[package]
+name = "oblivious-transfer"
+version = "0.1.0"
+authors = ["Robin Hundt <24554122+robinhundt@users.noreply.github.com>"]
+edition = "2018"
+resolver = "2"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+async-trait = "0.1.50"
+curve25519-dalek = "4.0.0-pre.0"
+rand = "0.8.3"
+sha2 = "0.9.4"
+crossbeam = "0.8.0"
+aes = "0.7.2"
+block-modes = "0.8.1"
+thiserror = "1.0.25"
+futures = "0.3.15"
+
+[dev-dependencies]
+futures = { version = "0.3.15" , features = ["executor"]}
