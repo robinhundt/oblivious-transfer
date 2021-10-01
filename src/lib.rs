@@ -4,6 +4,8 @@ use block_modes::block_padding::Pkcs7;
 use block_modes::Cbc;
 use futures::{Sink, Stream};
 use rand::{CryptoRng, Rng};
+use serde::de::DeserializeOwned;
+use serde::Serialize;
 
 mod chou_orlandi;
 mod util;
@@ -15,6 +17,7 @@ pub trait OTSender
 where
     Self: Sized,
 {
+    type Input: Serialize + DeserializeOwned;
     type Msg;
 
     async fn init<RNG, S, R>(sink: &mut S, stream: &mut R, rng: &mut RNG) -> Result<Self, Error>
@@ -25,7 +28,7 @@ where
 
     async fn send<RNG, S, R>(
         &mut self,
-        inputs: [Self::Msg; 2],
+        inputs: [Self::Input; 2],
         sink: &mut S,
         stream: &mut R,
         rng: &mut RNG,
@@ -41,6 +44,7 @@ pub trait OTReceiver
 where
     Self: Sized,
 {
+    type Output: Serialize + DeserializeOwned;
     type Msg;
 
     async fn init<RNG, S, R>(sink: &mut S, stream: &mut R, rng: &mut RNG) -> Result<Self, Error>
@@ -55,7 +59,7 @@ where
         sink: &mut S,
         stream: &mut R,
         rng: &mut RNG,
-    ) -> Result<Self::Msg, Error>
+    ) -> Result<Self::Output, Error>
     where
         RNG: CryptoRng + Rng + Send,
         S: Sink<Self::Msg> + Unpin + Send,
@@ -66,6 +70,8 @@ where
 pub enum Error {
     #[error("No init message received")]
     NoInitReceived,
+    #[error("Wrong message")]
+    WrongMessage,
     #[error("Error sending ciphertexts")]
     SendCiphertexts,
     #[error("Ciphertext missing")]

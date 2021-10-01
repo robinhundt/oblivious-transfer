@@ -1,6 +1,7 @@
-use crate::util::hash_point;
+use crate::util::derive_key_from_point;
 use crate::{Aes256Cbc, Error, OTReceiver, OTSender};
 use aes::cipher::generic_array::typenum::Unsigned;
+use aes::cipher::generic_array::GenericArray;
 use async_trait::async_trait;
 use block_modes::BlockMode;
 use curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT;
@@ -9,15 +10,23 @@ use curve25519_dalek::scalar::Scalar;
 use futures::TryFutureExt;
 use futures::{Sink, SinkExt, Stream, StreamExt};
 use rand::{CryptoRng, Rng};
+use serde::{Deserialize, Serialize};
 
 pub struct Sender {
     secret: Scalar,
     share: RistrettoPoint,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum OTMessage {
+    RistrettoPoint(RistrettoPoint),
+    Bytes(Vec<u8>),
+}
+
 #[async_trait]
 impl OTSender for Sender {
-    type Msg = Vec<u8>;
+    type Input = Vec<u8>;
+    type Msg = OTMessage;
 
     async fn init<RNG, S, R>(sink: &mut S, _stream: &mut R, rng: &mut RNG) -> Result<Self, Error>
     where
@@ -27,7 +36,7 @@ impl OTSender for Sender {
     {
         let secret = Scalar::random(rng);
         let share = RISTRETTO_BASEPOINT_POINT * secret;
-        sink.send(share.compress().as_bytes().to_vec())
+        sink.send(OTMessage::RistrettoPoint(share.clone()))
             .map_err(|_| Error::SendCiphertexts)
             .await?;
         Ok(Self { secret, share })
@@ -35,7 +44,7 @@ impl OTSender for Sender {
 
     async fn send<RNG, S, R>(
         &mut self,
-        inputs: [Self::Msg; 2],
+        inputs: [Self::Input; 2],
         sink: &mut S,
         stream: &mut R,
         rng: &mut RNG,
@@ -45,20 +54,26 @@ impl OTSender for Sender {
         S: Sink<Self::Msg> + Unpin + Send,
         R: Stream<Item = Self::Msg> + Unpin + Send,
     {
-        let compressed_point = stream.next().await.ok_or(Error::NoInitReceived)?;
-        let share = CompressedRistretto::from_slice(compressed_point.as_slice())
-            .decompress()
-            .unwrap();
-        let k0 = hash_point(self.secret * share);
-        let k1 = hash_point((share - self.share) * self.secret);
+        let msg = stream.next().await.ok_or(Error::NoInitReceived)?;
+        let share = match msg {
+            OTMessage::RistrettoPoint(point) => point,
+            OTMessage::Bytes(_) => return Err(Error::WrongMessage),
+        };
+        let k0 = derive_key_from_point(self.secret * share);
+        let k1 = derive_key_from_point((share - self.share) * self.secret);
         let keys = [k0, k1];
-        let ivs: [[u8; <Aes256Cbc as BlockMode<_, _>>::IvSize::USIZE]; 2] = [rng.gen(), rng.gen()];
+        let ivs: [GenericArray<_, _>; 2] = [
+            rng.gen::<[u8; <Aes256Cbc as BlockMode<_, _>>::IvSize::USIZE]>()
+                .into(),
+            rng.gen::<[u8; <Aes256Cbc as BlockMode<_, _>>::IvSize::USIZE]>()
+                .into(),
+        ];
         for ((k, iv), input) in keys.iter().zip(&ivs).zip(&inputs) {
-            let cipher = Aes256Cbc::new_from_slices(k, iv).unwrap();
+            let cipher = Aes256Cbc::new_fix(k, iv);
             let mut ciphertext = cipher.encrypt_vec(input.as_slice());
-            let mut iv_ciphertext = Vec::from(*iv);
+            let mut iv_ciphertext = iv.to_vec();
             iv_ciphertext.append(&mut ciphertext);
-            sink.send(iv_ciphertext)
+            sink.send(OTMessage::Bytes(iv_ciphertext))
                 .map_err(|_| Error::SendCiphertexts)
                 .await?;
         }
@@ -72,6 +87,7 @@ pub struct Receiver {
 
 #[async_trait]
 impl OTReceiver for Receiver {
+    type Output = <Sender as OTSender>::Input;
     type Msg = <Sender as OTSender>::Msg;
 
     async fn init<RNG, S, R>(_sink: &mut S, stream: &mut R, _rng: &mut RNG) -> Result<Self, Error>
@@ -80,10 +96,11 @@ impl OTReceiver for Receiver {
         S: Sink<Self::Msg> + Unpin + Send,
         R: Stream<Item = Self::Msg> + Unpin + Send,
     {
-        let compressed_point = stream.next().await.ok_or(Error::NoInitReceived)?;
-        let share = CompressedRistretto::from_slice(compressed_point.as_slice())
-            .decompress()
-            .unwrap();
+        let msg = stream.next().await.ok_or(Error::NoInitReceived)?;
+        let share = match msg {
+            OTMessage::RistrettoPoint(point) => point,
+            OTMessage::Bytes(_) => return Err(Error::WrongMessage),
+        };
         Ok(Self { share })
     }
 
@@ -93,7 +110,7 @@ impl OTReceiver for Receiver {
         sink: &mut S,
         stream: &mut R,
         rng: &mut RNG,
-    ) -> Result<Self::Msg, Error>
+    ) -> Result<Self::Output, Error>
     where
         RNG: CryptoRng + Rng + Send,
         S: Sink<Self::Msg> + Unpin + Send,
@@ -105,19 +122,24 @@ impl OTReceiver for Receiver {
         } else {
             scalar * RISTRETTO_BASEPOINT_POINT
         };
-        sink.send(share.compress().as_bytes().to_vec())
+        sink.send(OTMessage::RistrettoPoint(share.clone()))
             .map_err(|_| Error::SendCiphertexts)
             .await?;
-        let k = hash_point(self.share * scalar);
+        let k = derive_key_from_point(self.share * scalar);
         let skip_amount = if input { 1 } else { 0 };
         let msg = stream
             .skip(skip_amount)
             .next()
             .await
             .ok_or(Error::CiphertextMissing)?;
-        let (iv, c) = split_iv_ciphertext(&msg);
+        let ciphertext = match msg {
+            OTMessage::RistrettoPoint(_) => return Err(Error::WrongMessage),
+            OTMessage::Bytes(c) => c,
+        };
+        let (iv, c) = split_iv_ciphertext(&ciphertext);
         let cipher = Aes256Cbc::new_from_slices(&k, iv).unwrap();
-        cipher.decrypt_vec(c).map_err(|_| Error::DecryptionError)
+        let res = cipher.decrypt_vec(c).map_err(|_| Error::DecryptionError)?;
+        Ok(res)
     }
 }
 
