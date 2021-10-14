@@ -7,7 +7,7 @@ use rand::{CryptoRng, Rng};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
-mod chou_orlandi;
+mod hl17;
 mod util;
 
 pub(crate) type Aes256Cbc = Cbc<Aes256, Pkcs7>;
@@ -17,7 +17,7 @@ pub trait OTSender
 where
     Self: Sized,
 {
-    type Input: Serialize + DeserializeOwned;
+    type Input;
     type Msg;
 
     async fn init<RNG, S, R>(sink: &mut S, stream: &mut R, rng: &mut RNG) -> Result<Self, Error>
@@ -44,7 +44,7 @@ pub trait OTReceiver
 where
     Self: Sized,
 {
-    type Output: Serialize + DeserializeOwned;
+    type Output;
     type Msg;
 
     async fn init<RNG, S, R>(sink: &mut S, stream: &mut R, rng: &mut RNG) -> Result<Self, Error>
