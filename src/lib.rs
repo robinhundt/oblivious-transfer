@@ -1,38 +1,30 @@
-use aes::Aes256;
 use async_trait::async_trait;
-use block_modes::block_padding::Pkcs7;
-use block_modes::Cbc;
+use digest::generic_array::{ArrayLength, GenericArray};
 use futures::{Sink, Stream};
 use rand::{CryptoRng, Rng};
-use serde::de::DeserializeOwned;
-use serde::Serialize;
 
 mod hl17;
-mod util;
-
-pub(crate) type Aes256Cbc = Cbc<Aes256, Pkcs7>;
 
 #[async_trait]
-pub trait OTSender
+pub trait BaseOTSender
 where
     Self: Sized,
 {
-    type Input;
+    type OutputSize: ArrayLength<u8>;
     type Msg;
 
     async fn init<RNG, S, R>(sink: &mut S, stream: &mut R, rng: &mut RNG) -> Result<Self, Error>
     where
         RNG: CryptoRng + Rng + Send,
         S: Sink<Self::Msg> + Unpin + Send,
-        R: Stream<Item = Self::Msg> + Send;
+        R: Stream<Item = Self::Msg> + Unpin + Send;
 
     async fn send<RNG, S, R>(
         &mut self,
-        inputs: [Self::Input; 2],
         sink: &mut S,
         stream: &mut R,
         rng: &mut RNG,
-    ) -> Result<(), Error>
+    ) -> Result<[GenericArray<u8, Self::OutputSize>; 2], Error>
     where
         RNG: CryptoRng + Rng + Send,
         S: Sink<Self::Msg> + Unpin + Send,
@@ -40,14 +32,19 @@ where
 }
 
 #[async_trait]
-pub trait OTReceiver
+pub trait BaseOTReceiver
 where
     Self: Sized,
 {
-    type Output;
+    type OutputSize: ArrayLength<u8>;
     type Msg;
 
-    async fn init<RNG, S, R>(sink: &mut S, stream: &mut R, rng: &mut RNG) -> Result<Self, Error>
+    async fn init<RNG, S, R>(
+        choice: bool,
+        sink: &mut S,
+        stream: &mut R,
+        rng: &mut RNG,
+    ) -> Result<Self, Error>
     where
         RNG: CryptoRng + Rng + Send,
         S: Sink<Self::Msg> + Unpin + Send,
@@ -55,11 +52,10 @@ where
 
     async fn receive<RNG, S, R>(
         &mut self,
-        input: bool,
         sink: &mut S,
         stream: &mut R,
         rng: &mut RNG,
-    ) -> Result<Self::Output, Error>
+    ) -> Result<GenericArray<u8, Self::OutputSize>, Error>
     where
         RNG: CryptoRng + Rng + Send,
         S: Sink<Self::Msg> + Unpin + Send,
@@ -72,8 +68,8 @@ pub enum Error {
     NoInitReceived,
     #[error("Wrong message")]
     WrongMessage,
-    #[error("Error sending ciphertexts")]
-    SendCiphertexts,
+    #[error("Error sending init message")]
+    SendInit,
     #[error("Ciphertext missing")]
     CiphertextMissing,
     #[error("Unable to decrypt ciphertext")]
