@@ -39,12 +39,7 @@ where
     type OutputSize: ArrayLength<u8>;
     type Msg;
 
-    async fn init<RNG, S, R>(
-        choice: bool,
-        sink: &mut S,
-        stream: &mut R,
-        rng: &mut RNG,
-    ) -> Result<Self, Error>
+    async fn init<RNG, S, R>(sink: &mut S, stream: &mut R, rng: &mut RNG) -> Result<Self, Error>
     where
         RNG: CryptoRng + Rng + Send,
         S: Sink<Self::Msg> + Unpin + Send,
@@ -52,6 +47,7 @@ where
 
     async fn receive<RNG, S, R>(
         &mut self,
+        choice: bool,
         sink: &mut S,
         stream: &mut R,
         rng: &mut RNG,

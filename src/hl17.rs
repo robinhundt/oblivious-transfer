@@ -24,7 +24,6 @@ pub struct Sender {
     y: Scalar,
     S: RistrettoPoint,
     T: RistrettoPoint,
-    R: RistrettoPoint,
 }
 
 pub struct Receiver {
@@ -32,7 +31,7 @@ pub struct Receiver {
     i: usize,
     x: Scalar,
     S: RistrettoPoint,
-    R: RistrettoPoint,
+    T: RistrettoPoint,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -46,7 +45,7 @@ impl BaseOTSender for Sender {
     type OutputSize = <Blake2b as FixedOutput>::OutputSize;
     type Msg = OTMessage;
 
-    async fn init<RNG, S, R>(sink: &mut S, stream: &mut R, rng: &mut RNG) -> Result<Self, Error>
+    async fn init<RNG, S, R>(sink: &mut S, _stream: &mut R, rng: &mut RNG) -> Result<Self, Error>
     where
         RNG: CryptoRng + Rng + Send,
         S: Sink<Self::Msg> + Unpin + Send,
@@ -58,18 +57,13 @@ impl BaseOTSender for Sender {
         sink.send(OTMessage::RistrettoPoint(S))
             .await
             .map_err(|_| SendInit)?;
-        let R = match stream.next().await {
-            None => Err(NoInitReceived)?,
-            Some(OTMessage::RistrettoPoint(R)) => R,
-            Some(_) => Err(WrongMessage)?,
-        };
-        Ok(Self { i: 0, y, S, T, R })
+        Ok(Self { i: 0, y, S, T })
     }
 
     async fn send<RNG, S, R>(
         &mut self,
         _sink: &mut S,
-        _stream: &mut R,
+        stream: &mut R,
         _rng: &mut RNG,
     ) -> Result<[GenericArray<u8, Self::OutputSize>; 2], Error>
     where
@@ -77,11 +71,16 @@ impl BaseOTSender for Sender {
         S: Sink<Self::Msg> + Unpin + Send,
         R: Stream<Item = Self::Msg> + Unpin + Send,
     {
+        let R = match stream.next().await {
+            None => Err(NoInitReceived)?,
+            Some(OTMessage::RistrettoPoint(R)) => R,
+            Some(_) => Err(WrongMessage)?,
+        };
         let compressed_S_R = {
             // A CompressedRistretto is 32 bytes big, we need to hash 3
             let mut t = Vec::with_capacity(3 * COMPRESSED_RISTRETTO_SIZE);
             t.extend_from_slice(self.S.compress().as_bytes());
-            t.extend_from_slice(self.R.compress().as_bytes());
+            t.extend_from_slice(R.compress().as_bytes());
             t
         };
         let mut hasher = Blake2b::new();
@@ -90,8 +89,8 @@ impl BaseOTSender for Sender {
             hasher.update(point.compress().as_bytes());
             hasher.finalize_reset()
         };
-        let out0 = hash_points(&self.R * &self.y);
-        let out1 = hash_points(&self.y * (&self.R - &self.T));
+        let out0 = hash_points(&R * &self.y);
+        let out1 = hash_points(&self.y * (&R - &self.T));
         Ok([out0, out1])
     }
 }
@@ -101,12 +100,7 @@ impl BaseOTReceiver for Receiver {
     type OutputSize = <Blake2b as FixedOutput>::OutputSize;
     type Msg = <Sender as BaseOTSender>::Msg;
 
-    async fn init<RNG, S, R>(
-        choice: bool,
-        sink: &mut S,
-        stream: &mut R,
-        rng: &mut RNG,
-    ) -> Result<Self, Error>
+    async fn init<RNG, S, R>(_sink: &mut S, stream: &mut R, rng: &mut RNG) -> Result<Self, Error>
     where
         RNG: CryptoRng + Rng + Send,
         S: Sink<Self::Msg> + Unpin + Send,
@@ -119,16 +113,13 @@ impl BaseOTReceiver for Receiver {
             Some(_) => Err(WrongMessage)?,
         };
         let T = RistrettoPoint::hash_from_bytes::<Blake2b>(S.compress().as_bytes());
-        let R = &RISTRETTO_BASEPOINT_TABLE * &x + &T * Scalar::from(u8::from(choice));
-        sink.send(OTMessage::RistrettoPoint(R))
-            .await
-            .map_err(|_| SendInit)?;
-        Ok(Self { i: 0, x, S, R })
+        Ok(Self { i: 0, x, S, T })
     }
 
     async fn receive<RNG, S, R>(
         &mut self,
-        _sink: &mut S,
+        choice: bool,
+        sink: &mut S,
         _stream: &mut R,
         _rng: &mut RNG,
     ) -> Result<GenericArray<u8, Self::OutputSize>, Error>
@@ -137,9 +128,13 @@ impl BaseOTReceiver for Receiver {
         S: Sink<Self::Msg> + Unpin + Send,
         R: Stream<Item = Self::Msg> + Unpin + Send,
     {
+        let R = &RISTRETTO_BASEPOINT_TABLE * &self.x + &self.T * Scalar::from(u8::from(choice));
+        sink.send(OTMessage::RistrettoPoint(R))
+            .await
+            .map_err(|_| SendInit)?;
         let mut hasher = Blake2b::new();
         hasher.update(self.S.compress().as_bytes());
-        hasher.update(self.R.compress().as_bytes());
+        hasher.update(R.compress().as_bytes());
         hasher.update((&self.S * &self.x).compress().as_bytes());
         Ok(hasher.finalize())
     }
@@ -161,12 +156,12 @@ mod tests {
         let mut rng_send = StdRng::seed_from_u64(42);
         let mut rng_recv = StdRng::seed_from_u64(42 * 42);
         let sender = Sender::init(&mut s0, &mut r1, &mut rng_send);
-        let receiver = Receiver::init(true, &mut s1, &mut r0, &mut rng_recv);
+        let receiver = Receiver::init(&mut s1, &mut r0, &mut rng_recv);
 
         let (sender, receiver) = executor::block_on(future::join(sender, receiver));
         let (mut sender, mut receiver) = (sender.unwrap(), receiver.unwrap());
         let send_fut = sender.send(&mut s0, &mut r1, &mut rng_send);
-        let recv_fut = receiver.receive(&mut s1, &mut r0, &mut rng_recv);
+        let recv_fut = receiver.receive(true, &mut s1, &mut r0, &mut rng_recv);
         let (snd_res, rcv_res) = executor::block_on(future::join(send_fut, recv_fut));
         assert_eq!(snd_res.unwrap()[1], rcv_res.unwrap())
     }
